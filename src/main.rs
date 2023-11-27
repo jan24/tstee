@@ -26,13 +26,13 @@ fn verify_formatstr(formatstr: &str) {
 }
 
 
-fn tstee(mut files: Vec<Box<dyn Write>>, formatstr: &str, relative_flag: bool, utc_flag: bool) -> Result<(), Box<dyn Error>> {
+fn tstee(mut files: Vec<Box<dyn Write>>, formatstr: &str, relative_flag: bool, incre_flag: bool, utc_flag: bool) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let stdout = stdout.lock();
     files.push(Box::new(stdout));
     let mut line: Vec<u8> = Vec::new();
-    match relative_flag {
-        true => {
+    match (relative_flag, incre_flag) {
+        (true, false) => {
             let delayformat = DelayedFormat::new(formatstr.to_string());
             let start_time = Instant::now();
             let stdin = io::stdin();
@@ -55,7 +55,31 @@ fn tstee(mut files: Vec<Box<dyn Write>>, formatstr: &str, relative_flag: bool, u
                 }
             }
         }
-        false => {
+        (false, true) => {
+            let delayformat = DelayedFormat::new(formatstr.to_string());
+            let mut start_time = Instant::now();
+            let stdin = io::stdin();
+            let mut stdin = stdin.lock();
+            loop {
+                match stdin.read_until(b'\n', &mut line) {
+                    Ok(n_bytes) => {
+                        if n_bytes == 0 { break; }
+                        for f in &mut files {
+                            let m = MyDuration::new(start_time.elapsed(), &delayformat);
+                            write!(f, "{} ", m)?;
+                            f.write_all(&line)?;
+                        }
+                        start_time = Instant::now();
+                        line.clear();
+                    }
+                    Err(e) => {
+                        eprintln!("Error when read stdin: {e}");
+                        process::exit(1);
+                    }
+                }
+            }
+        }
+        (false, false) => {
             let stdin = io::stdin();
             let mut stdin = stdin.lock();
             loop {
@@ -80,6 +104,7 @@ fn tstee(mut files: Vec<Box<dyn Write>>, formatstr: &str, relative_flag: bool, u
                 }
             }
         }
+        _ => ()
     };
     Ok(())
 }
@@ -106,21 +131,21 @@ fn main() {
             .long_help(
                 r#"this parameter controls how the timestamp is formatted, default format "%Y-%m-%d %H:%M:%S%.3f".
   most of common timestamp formats are supported.
-  if the -r switch is passed, only support %H %h %M %m %S %s %.f %.Nf:
+  if the -r/-i switch is passed, only support %H %h %M %m %S %s %.f %.Nf:
   for example, time elapsed is 94028.602718334 seconds
-      %s    =>  94028
-      %S    =>  08  [00-59]
-      %m    =>  1567
-      %M    =>  07  [00-59]
-      %h    =>  26
-      %H    =>  02  [00-23]
-      %.f   =>  .6
-      %.2f  =>  .60
-      %.6f  =>  .602718
-      %.9f  =>  .602718334
+      %s    =>  94028       Number of seconds
+      %S    =>  08          Second number (00–59), zero-padded to 2 digits.
+      %m    =>  1567        Number of minutes
+      %M    =>  07          Minute number (00–59), zero-padded to 2 digits.
+      %h    =>  26          Number of hours
+      %H    =>  02          Hour number (00–23), zero-padded to 2 digits.
+      %.f   =>  .6          Decimal fraction of a second with a fixed length of 1
+      %.1f  =>  .6          Decimal fraction of a second with a fixed length of 1
+      %.2f  =>  .60         Decimal fraction of a second with a fixed length of 2
+      %.6f  =>  .602718     Decimal fraction of a second with a fixed length of 6
+      %.9f  =>  .602718334  Decimal fraction of a second with a fixed length of 9
       "%Hh:%Mm:%S%.3fs" => "02h:07m:08.602s"
-      "total %h hours ,or %m minutes, or %s seconds" => "total 26 hours ,or 1567 minutes, or 94028 seconds"
-      "#)
+      "total %h hours ,or %m minutes, or %s seconds" => "total 26 hours ,or 1567 minutes, or 94028 seconds""#)
         )
         .arg(Arg::new("relative")
             .short('r')
@@ -128,15 +153,22 @@ fn main() {
             .action(clap::ArgAction::SetTrue)
             .help(r#"use the time elapsed since start of the program. default format "%H:%M:%S%.3f""#)
         )
+        .arg(Arg::new("incremental")
+            .short('i')
+            .long("incremental")
+            .action(clap::ArgAction::SetTrue)
+            .help(r#"use the time elapsed since the last timestamp. default format "%H:%M:%S%.3f""#)
+        )
         .arg(Arg::new("utc")
             .short('u')
             .long("utc")
             .action(clap::ArgAction::SetTrue)
-            .help("use UTC+00:00, NOT the current timezone of the OS. if the -r switch is passed, this flag will not take effect")
+            .help("use UTC+00:00, NOT the current timezone of the OS. if the -r/-i switch is passed, this flag will not take effect")
         )
         .after_help("Examples: ping www.google.com | tstee ping.log")
         .get_matches();
 
+    let incre_flag = *cli.get_one::<bool>("incremental").unwrap();
     let relative_flag = *cli.get_one::<bool>("relative").unwrap();
     let utc_flag = *cli.get_one::<bool>("utc").unwrap();
     let arg_files = cli
@@ -147,9 +179,13 @@ fn main() {
         .get_many::<String>("file")
         .unwrap_or_default()
         .collect::<Vec<_>>();
+    if incre_flag && relative_flag {
+        eprintln!("Error: -r -i switch can not passed at the same time");
+        process::exit(1);
+    }
     let formatstr = match cli.get_one::<String>("formatstr") {
         None => {
-            if relative_flag {
+            if relative_flag || incre_flag {
                 "%H:%M:%S%.3f"
             } else {
                 "%Y-%m-%d %H:%M:%S%.3f"
@@ -157,7 +193,7 @@ fn main() {
         }
         Some(s) => s,
     };
-    if !relative_flag {
+    if !relative_flag && !incre_flag {
         verify_formatstr(formatstr);
     }
     let mut files: Vec<Box<dyn Write>> = Vec::new();
@@ -201,6 +237,6 @@ fn main() {
     }
 
 
-    let _ = tstee(files, formatstr, relative_flag, utc_flag);
+    let _ = tstee(files, formatstr, relative_flag, incre_flag, utc_flag);
 }
 
